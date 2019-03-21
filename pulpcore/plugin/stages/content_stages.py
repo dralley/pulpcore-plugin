@@ -89,22 +89,23 @@ class ContentSaver(Stage):
         """
         async for batch in self.batches():
             content_artifact_bulk = []
+            new_batch = []
             with transaction.atomic():
                 await self._pre_save(batch)
+                content_to_save = defaultdict(list)
+
                 for d_content in batch:
-                    # Are we saving to the database for the first time?
-                    content_already_saved = not d_content.content._state.adding
-                    if not content_already_saved:
-                        try:
-                            with transaction.atomic():
-                                d_content.content.save()
-                        except IntegrityError:
-                            d_content.content = \
-                                d_content.content.__class__.objects.get(
-                                    d_content.content.q())
-                            continue
+                    content_to_save[d_content.content.__class__].append(d_content.content)
+
+                for ctype, typed_content in content_to_save.items():
+                    saved_content = ctype.objects.bulk_get_or_create(typed_content)
+
+                    for d_content, content in zip(batch, saved_content):
+                        d_content.content = content
                         for d_artifact in d_content.d_artifacts:
-                            if not d_artifact.artifact._state.adding:
+                            artifact_already_saved = not d_artifact.artifact._state.adding
+
+                            if artifact_already_saved:
                                 artifact = d_artifact.artifact
                             else:
                                 # set to None for lazy synced artifacts
@@ -115,9 +116,10 @@ class ContentSaver(Stage):
                                 relative_path=d_artifact.relative_path
                             )
                             content_artifact_bulk.append(content_artifact)
+                        new_batch.append(d_content)
                 ContentArtifact.objects.bulk_get_or_create(content_artifact_bulk)
-                await self._post_save(batch)
-            for declarative_content in batch:
+                await self._post_save(new_batch)
+            for declarative_content in new_batch:
                 await self.put(declarative_content)
 
     async def _pre_save(self, batch):
